@@ -605,14 +605,22 @@ class _LockImpl(AsyncContextManagerMixin):
             self.acquire_nowait()
         except trio.WouldBlock:
             try:
-                # NOTE: it's important that the contended acquire path is just
-                # "_lot.park()", because that's how Condition.wait() acquires the
-                # lock as well.
+                # NOTE: the contended acquire path must park directly on
+                # "_lot", because that's how Condition.wait() acquires the lock
+                # as well.
                 await self._lot.park()
             except trio.BrokenResourceError:
                 raise trio.BrokenResourceError(
                     f"Owner of this lock exited without releasing: {self._owner}",
                 ) from None
+            try:
+                # release() may have handed us the lock before a pending
+                # cancellation became visible. Passing the lock on here keeps
+                # a cancelled waiter from stranding the whole queue.
+                await trio.lowlevel.checkpoint_if_cancelled()
+            except trio.Cancelled:
+                self.release()
+                raise
         else:
             await trio.lowlevel.cancel_shielded_checkpoint()
 

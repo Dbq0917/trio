@@ -404,6 +404,47 @@ async def test_Lock_and_StrictFIFOLock(
     assert statistics.tasks_waiting == 0
 
 
+@pytest.mark.parametrize("lockcls", [Lock, StrictFIFOLock], ids=lambda fn: fn.__name__)
+async def test_Lock_cancel_after_handoff(
+    lockcls: type[Lock | StrictFIFOLock],
+) -> None:
+    lock = lockcls()
+    record = []
+    waiter_scope = _core.CancelScope()
+
+    async def cancelled_waiter() -> None:
+        with waiter_scope:
+            try:
+                await lock.acquire()
+            except _core.Cancelled:
+                record.append("cancelled")
+                raise
+            else:
+                record.append("acquired")
+                await sleep_forever()
+
+    async def later_waiter() -> None:
+        async with lock:
+            record.append("later acquired")
+
+    lock.acquire_nowait()
+    async with _core.open_nursery() as nursery:
+        nursery.start_soon(cancelled_waiter)
+        nursery.start_soon(later_waiter)
+        await wait_all_tasks_blocked()
+        assert lock.statistics().tasks_waiting == 2
+
+        # release() hands the lock to cancelled_waiter. Cancel it before it
+        # gets a chance to run, so it cannot release the lock itself.
+        lock.release()
+        waiter_scope.cancel()
+        await wait_all_tasks_blocked()
+
+        assert not lock.locked()
+        assert lock.statistics().tasks_waiting == 0
+        assert record == ["cancelled", "later acquired"]
+
+
 async def test_Condition() -> None:
     with pytest.raises(TypeError):
         Condition(Semaphore(1))  # type: ignore[arg-type]
