@@ -613,6 +613,15 @@ class _LockImpl(AsyncContextManagerMixin):
                 raise trio.BrokenResourceError(
                     f"Owner of this lock exited without releasing: {self._owner}",
                 ) from None
+            try:
+                # The previous owner may have handed us the lock while a
+                # cancellation was pending. Resolve that cancellation here,
+                # while we still own the lock, so that unwinding cannot strand
+                # the lock after acquire() has effectively succeeded.
+                await trio.lowlevel.checkpoint_if_cancelled()
+            except BaseException:
+                self.release()
+                raise
         else:
             await trio.lowlevel.cancel_shielded_checkpoint()
 

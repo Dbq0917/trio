@@ -404,6 +404,46 @@ async def test_Lock_and_StrictFIFOLock(
     assert statistics.tasks_waiting == 0
 
 
+@pytest.mark.parametrize(
+    "lockcls",
+    [Lock, StrictFIFOLock],
+    ids=lambda cls: cls.__name__,
+)
+async def test_lock_cancelled_after_handoff_in_nested_scope(
+    lockcls: type[Lock | StrictFIFOLock],
+) -> None:
+    lock = lockcls()
+    outer_scope = _core.CancelScope()
+    inner_scope = _core.CancelScope()
+    record = []
+
+    async def cancelled_waiter() -> None:
+        with inner_scope:
+            await lock.acquire()
+            record.append("acquired")
+            await sleep_forever()
+
+    with outer_scope:
+        lock.acquire_nowait()
+        async with _core.open_nursery() as nursery:
+            nursery.start_soon(cancelled_waiter)
+            await wait_all_tasks_blocked()
+
+            # The handoff makes cancelled_waiter the owner, but its cancellation
+            # is not delivered until it gets a chance to run again.
+            lock.release()
+            inner_scope.cancel()
+            await wait_all_tasks_blocked()
+
+            assert not lock.locked()
+            assert lock.statistics().tasks_waiting == 0
+            async with lock:
+                record.append("next acquired")
+
+    assert inner_scope.cancelled_caught
+    assert record == ["next acquired"]
+
+
 async def test_Condition() -> None:
     with pytest.raises(TypeError):
         Condition(Semaphore(1))  # type: ignore[arg-type]
